@@ -5,6 +5,15 @@ import numpy as np  # For numerical operations
 # The dijkstra.py file contains an implementation of Dijkstra's algorithm for pathfinding.
 # This code can be used to compute the shortest path in a graph, which may represent environments for multi-agent navigation.
 
+# Overview of the Dijkstra's algorithm implementation in this file:
+# 1. **Graph Class**: The Graph class represents the environment as a graph, where nodes represent locations, and edges represent paths between locations.
+# 2. **add_edge Method**: This method adds edges between nodes in the graph, with a specified weight representing the distance or cost of traveling between those nodes.
+# 3. **dijkstra Method**: This method implements Dijkstra's algorithm to find the shortest path from a given starting node to all other nodes in the graph. It maintains a priority queue to always expand the nearest unvisited node.
+#    - The `distances` list stores the shortest distance from the start node to every other node.
+#    - The algorithm iterates through each node's neighbors, updating distances if a shorter path is found.
+#    - This ensures that the final distances list contains the shortest paths from the start node to all reachable nodes.
+# 4. **Example Usage**: The `example_usage` function demonstrates how to use the Graph class to create a graph, add edges, and compute the shortest paths using Dijkstra's algorithm.
+
 # Class to represent a graph using an adjacency list representation
 class Graph:
     def __init__(self, num_nodes):
@@ -59,21 +68,4 @@ class Graph:
 
         return distances  # Return the list of shortest distances
 
-# Example usage of the Graph class and Dijkstra's algorithm
-def example_usage():
-    # Create a graph with 5 nodes
-    graph = Graph(5)
-    # Add edges to the graph with their respective weights
-    graph.add_edge(0, 1, 2)
-    graph.add_edge(0, 2, 4)
-    graph.add_edge(1, 2, 1)
-    graph.add_edge(1, 3, 7)
-    graph.add_edge(2, 4, 3)
-    # Run Dijkstra's algorithm from the start node 0
-    distances = graph.dijkstra(0)
-    # Print the shortest distances from node 0 to all other nodes
-    print("Shortest distances from node 0:", distances)
-
-# Run the example usage if the script is executed directly
-if __name__ == "__main__":
-    example_usage()
+# Example usage of the Graph class and Di
