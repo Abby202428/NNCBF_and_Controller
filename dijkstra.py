@@ -1,254 +1,79 @@
-"""
+# Import necessary libraries
+import heapq  # For priority queue implementation
+import numpy as np  # For numerical operations
 
-Grid based Dijkstra planning
+# The dijkstra.py file contains an implementation of Dijkstra's algorithm for pathfinding.
+# This code can be used to compute the shortest path in a graph, which may represent environments for multi-agent navigation.
 
-author: Atsushi Sakai(@Atsushi_twi)
-
-"""
-import sys
-sys.dont_write_bytecode = True
-
-import matplotlib.pyplot as plt
-import math
-
-show_animation = False
-
-
-class Dijkstra:
-
-    def __init__(self, ox, oy, resolution, robot_radius):
+# Class to represent a graph using an adjacency list representation
+class Graph:
+    def __init__(self, num_nodes):
         """
-        Initialize map for a star planning
-
-        ox: x position list of Obstacles [m]
-        oy: y position list of Obstacles [m]
-        resolution: grid resolution [m]
-        rr: robot radius[m]
+        Initializes the Graph object.
+        Args:
+            num_nodes: The number of nodes in the graph.
         """
+        self.num_nodes = num_nodes  # Total number of nodes in the graph
+        self.edges = [[] for _ in range(num_nodes)]  # Adjacency list to store edges
 
-        self.min_x = None
-        self.min_y = None
-        self.max_x = None
-        self.max_y = None
-        self.x_width = None
-        self.y_width = None
-        self.obstacle_map = None
-
-        self.resolution = resolution
-        self.robot_radius = robot_radius
-        self.calc_obstacle_map(ox, oy)
-        self.motion = self.get_motion_model()
-
-    class Node:
-        def __init__(self, x, y, cost, parent_index):
-            self.x = x  # index of grid
-            self.y = y  # index of grid
-            self.cost = cost
-            self.parent_index = parent_index  # index of previous Node
-
-        def __str__(self):
-            return str(self.x) + "," + str(self.y) + "," + str(
-                self.cost) + "," + str(self.parent_index)
-
-    def planning(self, sx, sy, gx, gy):
+    def add_edge(self, u, v, weight):
         """
-        dijkstra path search
-
-        input:
-            s_x: start x position [m]
-            s_y: start y position [m]
-            gx: goal x position [m]
-            gx: goal x position [m]
-
-        output:
-            rx: x position list of the final path
-            ry: y position list of the final path
+        Adds an edge to the graph.
+        Args:
+            u: The starting node of the edge.
+            v: The ending node of the edge.
+            weight: The weight of the edge between nodes u and v.
         """
+        self.edges[u].append((v, weight))  # Add edge from u to v with the given weight
+        self.edges[v].append((u, weight))  # Since the graph is undirected, add edge from v to u as well
 
-        start_node = self.Node(self.calc_xy_index(sx, self.min_x),
-                               self.calc_xy_index(sy, self.min_y), 0.0, -1)
-        goal_node = self.Node(self.calc_xy_index(gx, self.min_x),
-                              self.calc_xy_index(gy, self.min_y), 0.0, -1)
+    def dijkstra(self, start_node):
+        """
+        Performs Dijkstra's algorithm to find the shortest path from a start node to all other nodes.
+        Args:
+            start_node: The node from which to start the shortest path search.
+        Returns:
+            distances: A list of shortest distances from the start node to each other node.
+        """
+        # Initialize distances to all nodes as infinity, except the start node which is set to 0
+        distances = [float('inf')] * self.num_nodes
+        distances[start_node] = 0
+        # Priority queue to store (distance, node) pairs
+        priority_queue = [(0, start_node)]
 
-        open_set, closed_set = dict(), dict()
-        open_set[self.calc_index(start_node)] = start_node
+        while priority_queue:
+            current_distance, current_node = heapq.heappop(priority_queue)  # Pop the node with the smallest distance
 
-        while True:
-            c_id = min(open_set, key=lambda o: open_set[o].cost)
-            current = open_set[c_id]
+            # If the current distance is greater than the recorded distance, skip processing this node
+            if current_distance > distances[current_node]:
+                continue
 
-            # show graph
-            if show_animation:  # pragma: no cover
-                plt.plot(self.calc_position(current.x, self.min_x),
-                         self.calc_position(current.y, self.min_y), "xc")
-                # for stopping simulation with the esc key.
-                plt.gcf().canvas.mpl_connect(
-                    'key_release_event',
-                    lambda event: [exit(0) if event.key == 'escape' else None])
-                if len(closed_set.keys()) % 10 == 0:
-                    plt.pause(0.001)
+            # Iterate over the neighbors of the current node
+            for neighbor, weight in self.edges[current_node]:
+                distance = current_distance + weight  # Calculate distance to the neighbor
 
-            if current.x == goal_node.x and current.y == goal_node.y:
-                goal_node.parent_index = current.parent_index
-                goal_node.cost = current.cost
-                break
+                # If a shorter path is found, update the distance and push to the priority queue
+                if distance < distances[neighbor]:
+                    distances[neighbor] = distance
+                    heapq.heappush(priority_queue, (distance, neighbor))
 
-            # Remove the item from the open set
-            del open_set[c_id]
+        return distances  # Return the list of shortest distances
 
-            # Add it to the closed set
-            closed_set[c_id] = current
+# Example usage of the Graph class and Dijkstra's algorithm
+def example_usage():
+    # Create a graph with 5 nodes
+    graph = Graph(5)
+    # Add edges to the graph with their respective weights
+    graph.add_edge(0, 1, 2)
+    graph.add_edge(0, 2, 4)
+    graph.add_edge(1, 2, 1)
+    graph.add_edge(1, 3, 7)
+    graph.add_edge(2, 4, 3)
+    # Run Dijkstra's algorithm from the start node 0
+    distances = graph.dijkstra(0)
+    # Print the shortest distances from node 0 to all other nodes
+    print("Shortest distances from node 0:", distances)
 
-            # expand search grid based on motion model
-            for move_x, move_y, move_cost in self.motion:
-                node = self.Node(current.x + move_x,
-                                 current.y + move_y,
-                                 current.cost + move_cost, c_id)
-                n_id = self.calc_index(node)
-
-                if n_id in closed_set:
-                    continue
-
-                if not self.verify_node(node):
-                    continue
-
-                if n_id not in open_set:
-                    open_set[n_id] = node  # Discover a new node
-                else:
-                    if open_set[n_id].cost >= node.cost:
-                        # This path is the best until now. record it!
-                        open_set[n_id] = node
-
-        rx, ry = self.calc_final_path(goal_node, closed_set)
-
-        return rx, ry
-
-    def calc_final_path(self, goal_node, closed_set):
-        # generate final course
-        rx, ry = [self.calc_position(goal_node.x, self.min_x)], [
-            self.calc_position(goal_node.y, self.min_y)]
-        parent_index = goal_node.parent_index
-        while parent_index != -1:
-            n = closed_set[parent_index]
-            rx.append(self.calc_position(n.x, self.min_x))
-            ry.append(self.calc_position(n.y, self.min_y))
-            parent_index = n.parent_index
-
-        return rx, ry
-
-    def calc_position(self, index, minp):
-        pos = index * self.resolution + minp
-        return pos
-
-    def calc_xy_index(self, position, minp):
-        return round((position - minp) / self.resolution)
-
-    def calc_index(self, node):
-        return (node.y - self.min_y) * self.x_width + (node.x - self.min_x)
-
-    def verify_node(self, node):
-        px = self.calc_position(node.x, self.min_x)
-        py = self.calc_position(node.y, self.min_y)
-
-        if px < self.min_x:
-            return False
-        if py < self.min_y:
-            return False
-        if px >= self.max_x:
-            return False
-        if py >= self.max_y:
-            return False
-
-        if self.obstacle_map[int(node.x)][int(node.y)]:
-            return False
-
-        return True
-
-    def calc_obstacle_map(self, ox, oy):
-
-        self.min_x = round(min(ox))
-        self.min_y = round(min(oy))
-        self.max_x = round(max(ox))
-        self.max_y = round(max(oy))
-
-        self.x_width = int(round((self.max_x - self.min_x) / self.resolution))
-        self.y_width = int(round((self.max_y - self.min_y) / self.resolution))
-
-        # obstacle map generation
-        self.obstacle_map = [[False for _ in range(self.y_width)]
-                             for _ in range(self.x_width)]
-        for ix in range(self.x_width):
-            x = self.calc_position(ix, self.min_x)
-            for iy in range(self.y_width):
-                y = self.calc_position(iy, self.min_y)
-                for iox, ioy in zip(ox, oy):
-                    d = math.hypot(iox - x, ioy - y)
-                    if d <= self.robot_radius:
-                        self.obstacle_map[ix][iy] = True
-                        break
-
-    @staticmethod
-    def get_motion_model():
-        # dx, dy, cost
-        motion = [[1, 0, 1],
-                  [0, 1, 1],
-                  [-1, 0, 1],
-                  [0, -1, 1],
-                  [-1, -1, math.sqrt(2)],
-                  [-1, 1, math.sqrt(2)],
-                  [1, -1, math.sqrt(2)],
-                  [1, 1, math.sqrt(2)]]
-
-        return motion
-
-
-def main():
-    print(__file__ + " start!!")
-
-    # start and goal position
-    sx = -5.0  # [m]
-    sy = -5.0  # [m]
-    gx = 50.0  # [m]
-    gy = 50.0  # [m]
-    grid_size = 5.0  # [m]
-    robot_radius = 1.0  # [m]
-
-    # set obstacle positions
-    ox, oy = [], []
-    for i in range(-10, 60):
-        ox.append(i)
-        oy.append(-10.0)
-    for i in range(-10, 60):
-        ox.append(60.0)
-        oy.append(i)
-    for i in range(-10, 61):
-        ox.append(i)
-        oy.append(60.0)
-    for i in range(-10, 61):
-        ox.append(-10.0)
-        oy.append(i)
-    for i in range(-10, 40):
-        ox.append(20.0)
-        oy.append(i)
-    for i in range(0, 40):
-        ox.append(40.0)
-        oy.append(60.0 - i)
-
-    if show_animation:  # pragma: no cover
-        plt.plot(ox, oy, ".k")
-        plt.plot(sx, sy, "og")
-        plt.plot(gx, gy, "xb")
-        plt.grid(True)
-        plt.axis("equal")
-
-    dijkstra = Dijkstra(ox, oy, grid_size, robot_radius)
-    rx, ry = dijkstra.planning(sx, sy, gx, gy)
-
-    if show_animation:  # pragma: no cover
-        plt.plot(rx, ry, "-r")
-        plt.pause(0.01)
-        plt.show()
-
-
-if __name__ == '__main__':
-    main()
+# Run the example usage if the script is executed directly
+if __name__ == "__main__":
+    example_usage()
