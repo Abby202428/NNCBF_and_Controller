@@ -1,180 +1,110 @@
 # Import necessary libraries
-import numpy as np
 import tensorflow as tf
+import numpy as np
+import argparse  # Command-line argument parsing
+import os  # For interacting with the operating system
+import core  # Custom core functions module, defining dynamics, CBFs, etc.
+import config  # Configuration settings for training
 
-# The core.py file contains the essential functions that define the system's dynamics, control, and evaluation.
-# The code is used to model and evaluate the performance of control barrier functions (CBF) for safe multi-agent control.
+# The train.py file contains the main function to train a neural network model for controlling agents using Control Barrier Functions (CBF).
+# The purpose of this file is to train a safe control policy for multi-agent systems.
 
-# Placeholder configuration parameters used throughout the code (these should be defined in the config module)
-DIST_MIN_THRES = 0.5  # Minimum distance threshold for safety
-DIST_SAFE = 1.0  # Safety distance for CBF
-OBS_RADIUS = 10.0  # Observation radius for agents
-TIME_STEP_EVAL = 0.1  # Time step used for evaluation
-ALPHA_CBF = 1.0  # Coefficient for CBF derivative constraint
-REFINE_LEARNING_RATE = 0.01  # Learning rate for refining the control input
-REFINE_LOOPS = 10  # Maximum number of loops for control refinement
+# Overview of core functions used in this code:
+# 1. **network_cbf**: This function computes the Control Barrier Function (CBF) values for the agents. The CBF values help ensure that agents maintain a safe distance from each other and obstacles. 
+#    It takes the current state of the agents and computes a function that indicates how close the system is to an unsafe state.
+# 2. **loss_barrier**: This function computes loss metrics based on the CBF values to evaluate safety. It calculates the loss for dangerous configurations where the CBF value is negative and measures how well agents avoid unsafe situations.
+# 3. **loss_actions**: This function computes loss metrics for control actions to ensure that the agents are following the desired trajectories or reaching the target states. The loss helps adjust the actions to achieve the desired control behavior while maintaining safety.
+# 4. **system_dynamics_tf**: This function models the dynamics of the system, which defines how the state evolves over time based on the control inputs.
+# 5. **baseline_controller_np**: This function is used to compute reference control inputs for comparison with learned controllers. It can act as a baseline or benchmark to compare the trained model's performance.
 
-# Placeholder function for network_cbf
-# This function computes the Control Barrier Function (CBF) values for agents.
-def network_cbf(x, r, indices=None):
+# Function to parse command-line arguments
+def parse_args():
+    parser = argparse.ArgumentParser()  # Create argument parser
+    # Add arguments for training configuration such as number of agents, maximum steps, model path, and other settings
+    parser.add_argument('--num_agents', type=int, default=64)
+    parser.add_argument('--max_steps', type=int, default=1000)
+    parser.add_argument('--learning_rate', type=float, default=0.001)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--model_path', type=str, default='model.ckpt')
+    parser.add_argument('--gpu', type=str, default='0')
+    args = parser.parse_args()  # Parse the arguments
+    return args  # Return parsed arguments
+
+# Function to build the training graph for the model
+def build_training_graph(num_agents, learning_rate):
     """
+    Builds the computation graph for training the neural network model.
     Args:
-        x: Tensor of shape (num_agents, num_agents, state_dim) representing differences between agent states.
-        r: Minimum distance threshold for safety.
-        indices: Optional indices for specific computations.
+        num_agents: The number of agents to train.
+        learning_rate: The learning rate for the optimizer.
     Returns:
-        h: CBF values for agent pairs.
-        mask: Safety mask indicating which agent pairs are too close.
-        indices: Indices used for computation (if any).
+        Placeholders, training operation, and loss operation for the model.
     """
-    # Placeholder implementation (actual implementation should compute the CBF values and safety masks).
-    h = tf.reduce_sum(x ** 2, axis=-1) - r ** 2  # Compute squared distance minus safety threshold.
-    mask = tf.cast(h < 0, tf.float32)  # Mask for pairs that are within unsafe distance.
-    return h, mask, indices
+    # Placeholder for state tensor representing the current state of agents
+    state_dim = 8  # Generalized state dimension
+    s = tf.placeholder(tf.float32, [None, num_agents, state_dim])  # Shape [batch_size, num_agents, state_dim]
+    # Placeholder for goal states tensor
+    s_ref = tf.placeholder(tf.float32, [None, num_agents, state_dim])  # Shape [batch_size, num_agents, state_dim]
+    # Placeholder for action tensor representing control actions
+    u = tf.placeholder(tf.float32, [None, num_agents, 3])  # Shape [batch_size, num_agents, control_dim]
 
-# Placeholder function for network_action
-# This function computes the control actions for agents based on the current state and reference state.
-def network_action(s, s_ref, obs_radius, indices=None):
-    """
-    Args:
-        s: Tensor of shape (num_agents, state_dim) representing the current state of the agents.
-        s_ref: Tensor of shape (num_agents, state_dim) representing the reference (goal) state.
-        obs_radius: Radius within which agents observe obstacles.
-        indices: Optional indices for specific computations.
-    Returns:
-        u: Control actions for agents.
-    """
-    # Placeholder implementation (actual implementation should compute control actions based on s and s_ref).
-    u = s_ref - s  # Control action as simple proportional controller.
-    return u
+    # Compute the CBF values for agents
+    h, mask, indices = core.network_cbf(x=s, r=config.DIST_MIN_THRES, indices=None)
+    # Compute the loss function using the barrier loss, control loss, and other metrics
+    loss_dang, loss_safe, acc_dang, acc_safe = core.loss_barrier(h=h, s=s, indices=indices)
+    loss_action = core.loss_actions(s=s, u=u, s_ref=s_ref, indices=indices)
 
-# Placeholder function for compute_safe_mask
-# This function computes a mask indicating whether agents are in a safe configuration.
-def compute_safe_mask(s, r, indices=None):
-    """
-    Args:
-        s: Tensor of shape (num_agents, state_dim) representing the current state of agents.
-        r: Safety distance.
-        indices: Optional indices for specific computations.
-    Returns:
-        safe_mask: Safety mask indicating which agents are in a safe configuration.
-    """
-    # Placeholder implementation (actual implementation should compute safety masks).
-    x = tf.expand_dims(s, 1) - tf.expand_dims(s, 0)  # Compute pairwise differences.
-    distance = tf.reduce_sum(x ** 2, axis=-1)  # Compute squared distance between agents.
-    safe_mask = distance >= r ** 2  # Agents are safe if their distance is above the safety threshold.
-    return safe_mask
+    # Total loss is the sum of the different loss components
+    total_loss = loss_dang + loss_safe + loss_action
 
-# Placeholder function for quadrotor_dynamics_tf
-# This function computes the time derivative of the state based on current state and control input.
-def quadrotor_dynamics_tf(s, u):
-    """
-    Args:
-        s: Tensor of shape (num_agents, state_dim) representing the current state of agents.
-        u: Tensor of shape (num_agents, control_dim) representing the control input.
-    Returns:
-        dsdt: Time derivative of the state.
-    """
-    # Placeholder implementation (actual implementation should model quadrotor dynamics).
-    dsdt = u  # Simple dynamics where control directly changes the state.
-    return dsdt
+    # Optimizer for training (Adam optimizer is used here)
+    optimizer = tf.train.AdamOptimizer(learning_rate)
+    train_op = optimizer.minimize(total_loss)  # Define the training operation
 
-# Placeholder function for loss_barrier
-# This function computes loss metrics based on the CBF values to evaluate safety.
-def loss_barrier(h, s, indices=None):
-    """
-    Args:
-        h: Tensor representing CBF values for agent pairs.
-        s: Tensor representing the current state of agents.
-        indices: Optional indices for specific computations.
-    Returns:
-        Loss and accuracy metrics related to barrier functions.
-    """
-    # Placeholder implementation (actual implementation should compute losses based on CBF values).
-    loss_dang = tf.reduce_sum(tf.maximum(-h, 0))  # Loss for dangerous configurations where CBF is negative.
-    loss_safe = tf.reduce_sum(tf.maximum(h, 0))  # Loss for configurations where CBF is positive (safe).
-    acc_dang = tf.reduce_mean(tf.cast(h < 0, tf.float32))  # Accuracy for dangerous configurations.
-    acc_safe = tf.reduce_mean(tf.cast(h >= 0, tf.float32))  # Accuracy for safe configurations.
-    return loss_dang, loss_safe, acc_dang, acc_safe
+    return s, s_ref, u, train_op, total_loss  # Return placeholders, training operation, and loss operation
 
-# Placeholder function for loss_derivatives
-# This function computes loss metrics based on the derivatives of the CBF values.
-def loss_derivatives(s, u, h, x, indices=None):
+# Function to train the model
+def train(args):
     """
+    Function to train the model for safe multi-agent control using Control Barrier Functions.
     Args:
-        s: Tensor representing the current state of agents.
-        u: Tensor representing control input.
-        h: Tensor representing CBF values.
-        x: Tensor representing state differences between agents.
-        indices: Optional indices for specific computations.
-    Returns:
-        Loss and accuracy metrics related to derivatives of barrier functions.
+        args: Parsed command-line arguments.
     """
-    # Placeholder implementation (actual implementation should compute losses based on CBF derivatives).
-    loss_dang_deriv = tf.reduce_sum(tf.maximum(-h, 0))  # Loss for negative CBF derivatives in dangerous states.
-    loss_safe_deriv = tf.reduce_sum(tf.maximum(h, 0))  # Loss for positive CBF derivatives in safe states.
-    loss_medium_deriv = tf.reduce_sum(tf.maximum(h, 0))  # Loss for intermediate configurations.
-    acc_dang_deriv = tf.reduce_mean(tf.cast(h < 0, tf.float32))  # Accuracy for dangerous CBF derivatives.
-    acc_safe_deriv = tf.reduce_mean(tf.cast(h >= 0, tf.float32))  # Accuracy for safe CBF derivatives.
-    acc_medium_deriv = tf.reduce_mean(tf.cast(h >= 0, tf.float32))  # Accuracy for medium configurations.
-    return loss_dang_deriv, loss_safe_deriv, loss_medium_deriv, acc_dang_deriv, acc_safe_deriv, acc_medium_deriv
+    # Set GPU for training if specified
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-# Placeholder function for loss_actions
-# This function computes loss metrics for control actions to ensure desired behavior.
-def loss_actions(s, u, s_ref, indices=None):
-    """
-    Args:
-        s: Tensor representing the current state of agents.
-        u: Tensor representing control input.
-        s_ref: Tensor representing the reference (goal) state of agents.
-        indices: Optional indices for specific computations.
-    Returns:
-        Loss metric related to control actions.
-    """
-    # Placeholder implementation (actual implementation should compute loss based on control actions).
-    loss_action = tf.reduce_sum((u - (s_ref - s)) ** 2)  # Loss between control input and desired input.
-    return loss_action
+    # Build the training graph
+    s, s_ref, u, train_op, total_loss = build_training_graph(args.num_agents, args.learning_rate)
 
-# Placeholder function for baseline_controller_np
-# This function is used to compute a reference control input for comparison with learned controllers.
-def baseline_controller_np(s, s_ref):
-    """
-    Args:
-        s: Numpy array representing the current state of agents.
-        s_ref: Numpy array representing the reference (goal) state of agents.
-    Returns:
-        u: Control actions computed using a baseline controller.
-    """
-    # Placeholder implementation (actual implementation should compute a control input using a baseline controller).
-    u = s_ref - s  # Simple proportional controller for reaching goal.
-    return u
+    # Create a session for training
+    with tf.Session() as sess:
+        # Initialize all variables
+        sess.run(tf.global_variables_initializer())
+        saver = tf.train.Saver()  # Saver to save model checkpoints
 
-# Placeholder function for system_dynamics_np
-# This function computes the time derivative of the state based on current state and control input (Numpy version).
-def system_dynamics_np(s, u):
-    """
-    Args:
-        s: Numpy array representing the current state of agents.
-        u: Numpy array representing control input.
-    Returns:
-        dsdt: Time derivative of the state.
-    """
-    # Placeholder implementation (actual implementation should model system dynamics).
-    dsdt = u  # Simple dynamics where control directly changes the state.
-    return dsdt
+        # Loop for training over the maximum number of steps
+        for step in range(args.max_steps):
+            # Generate random training data for states and reference states (placeholders for actual data generation)
+            s_batch = np.random.rand(args.batch_size, args.num_agents, 8)  # Random state batch
+            s_ref_batch = np.random.rand(args.batch_size, args.num_agents, 8)  # Random reference state batch
+            u_batch = np.random.rand(args.batch_size, args.num_agents, 3)  # Random control action batch
 
-# Placeholder function for dangerous_mask_np
-# This function computes a mask indicating which agent pairs are within a dangerous distance (Numpy version).
-def dangerous_mask_np(s, r):
-    """
-    Args:
-        s: Numpy array representing the current state of agents.
-        r: Minimum distance threshold for safety.
-    Returns:
-        mask: Mask indicating which agent pairs are within a dangerous distance.
-    """
-    # Placeholder implementation (actual implementation should compute the mask for dangerous distances).
-    x = np.expand_dims(s, 1) - np.expand_dims(s, 0)  # Compute pairwise differences.
-    distance = np.sum(x ** 2, axis=-1)  # Compute squared distance between agents.
-    mask = distance < r ** 2  # True if agents are within dangerous distance.
-    return mask
+            # Run the training operation and compute the loss
+            _, loss_value = sess.run([train_op, total_loss], feed_dict={s: s_batch, s_ref: s_ref_batch, u: u_batch})
+
+            # Print loss information every 100 steps
+            if step % 100 == 0:
+                print(f"Step {step}, Loss: {loss_value}")
+
+            # Save the model checkpoint every 500 steps
+            if step % 500 == 0:
+                saver.save(sess, args.model_path, global_step=step)
+
+# Main function to parse arguments and call the training function
+def main():
+    args = parse_args()  # Parse command-line arguments
+    train(args)  # Train the model using the parsed arguments
+
+# Run the main function if the script is executed directly
+if __name__ == '__main__':
+    main()
