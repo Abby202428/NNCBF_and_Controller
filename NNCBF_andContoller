@@ -1,186 +1,145 @@
 import torch
-from torch import nn
-import numpy as np
+import torch.nn as nn
+import torch.optim as optim
 
-# Define a Control Barrier Function (CBF) neural network
+# -------------------------
+# CBF Definition
+# -------------------------
 class CBF(nn.Module):
-    """
-    The CBF class is used to compute a Control Barrier Function (CBF) that helps ensure safety in control systems.
-    It takes the current state of the system and the obstacles as input and produces a value that indicates how close the state is to a safety boundary.
-    """
+    def __init__(self, input_dim, hidden_dim):
+        super(CBF, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+    
+    def forward(self, state, observation):
+        x = torch.cat([state, observation], dim=-1)
+        return self.net(x)  # Scalar CBF value
 
-    def __init__(self, state_dim, obstacle_dim, control_dim, preprocess=None):
-        super().__init__()
-        # Initialize class variables for dimensions of state, obstacle, and control.
-        self.state_dim = state_dim  # Dimension of the system state
-        self.obstacle_dim = obstacle_dim  # Number of obstacles to consider
-        self.control_dim = control_dim  # Dimension of the control input
-        self.preprocess = preprocess  # Optional preprocessing function for input data
+# -------------------------
+# Controller Definition
+# -------------------------
+class Controller(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(Controller, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    
+    def forward(self, state, observation):
+        x = torch.cat([state, observation], dim=-1)
+        return self.net(x)  # Control action
 
-        # Define a series of convolutional layers to process the input data.
-        # Conv1d layers are used here to extract features from the state-obstacle differences.
-        self.conv_layer0 = nn.Conv1d(state_dim, 64, 1)  # First convolutional layer
-        self.conv_layer1 = nn.Conv1d(64, 128, 1)  # Second convolutional layer
-        self.conv_layer2 = nn.Conv1d(128, 128, 1)  # Third convolutional layer
-        self.conv_layer3 = nn.Conv1d(128, 128, 1)  # Fourth convolutional layer
-        self.conv_layer4 = nn.Conv1d(128, 1, 1)  # Final convolutional layer to reduce dimensions
-        # Activation function to introduce non-linearity
-        self.activation_func = nn.ReLU()
-        # Output activation function (unused in forward pass, but defined for future use)
-        self.output_func = nn.Tanh()
+# -------------------------
+# Loss Functions
+# -------------------------
+def cbf_loss(cbf_model, states, observations, actions, safe_states, unsafe_states):
+    # CBF Conditions
+    safe_loss = torch.relu(-cbf_model(safe_states, observations))  # h(s) >= 0
+    unsafe_loss = torch.relu(cbf_model(unsafe_states, observations) + 1e-2)  # h(s) < 0
 
-    def forward(self, state, obstacle):
-        """
-        Forward pass of the CBF network.
-        Args:
-            state: Tensor of shape (batch_size, state_dim) representing the current state of the system.
-            obstacle: Tensor of shape (batch_size, obstacle_dim, state_dim) representing the positions of obstacles.
-        Returns:
-            h: Tensor of shape (batch_size, obstacle_dim) representing the computed CBF values for each obstacle.
-        """
-        # Add an extra dimension to the state tensor for compatibility with Conv1d.
-        state = torch.unsqueeze(state, 2)  # (batch_size, state_dim, 1)
-        # Rearrange obstacle tensor dimensions to match state tensor for computation.
-        obstacle = obstacle.permute(0, 2, 1)  # (batch_size, state_dim, obstacle_dim)
-        # Calculate the difference between the state and obstacle tensors.
-        state_diff = state - obstacle
+    # Gradient condition
+    gradients = torch.autograd.grad(
+        cbf_model(states, observations), states, grad_outputs=torch.ones_like(states),
+        create_graph=True
+    )[0]
+    gradient_loss = torch.relu(-gradients @ actions)
 
-        # Apply preprocessing function if defined.
-        if self.preprocess is not None:
-            state_diff = self.preprocess(state_diff)
+    return safe_loss.mean() + unsafe_loss.mean() + gradient_loss.mean()
 
-        # Pass the state-obstacle difference through the convolutional layers with activation.
-        x = self.activation_func(self.conv_layer0(state_diff))
-        x = self.activation_func(self.conv_layer1(x))
-        x = self.activation_func(self.conv_layer2(x))  # (batch_size, 128, obstacle_dim)
-        x = self.activation_func(self.conv_layer3(x))
-        x = self.conv_layer4(x)
-        # Squeeze the output tensor to remove unnecessary dimensions.
-        h = torch.squeeze(x, dim=1)  # (batch_size, obstacle_dim)
-        return h
+def controller_loss(controller_model, cbf_model, states, observations, actions_ref):
+    # Task loss
+    actions = controller_model(states, observations)
+    task_loss = ((actions - actions_ref) ** 2).mean()
 
+    # CBF regularization
+    cbf_values = cbf_model(states, observations)
+    safety_loss = torch.relu(-cbf_values).mean()
 
-# Define a neural network controller
-class NNController(nn.Module):
-    """
-    The NNController class is used to compute control actions based on the current state, obstacle information, and nominal control.
-    It outputs a control signal that adjusts the nominal control to ensure safety and performance.
-    """
+    return task_loss + 1e-2 * safety_loss
 
-    def __init__(self, state_dim, obstacle_dim, control_dim, preprocess=None, output_scale=1.0):
-        super().__init__()
-        # Initialize class variables for dimensions of state, obstacle, and control.
-        self.state_dim = state_dim  # Dimension of the system state
-        self.obstacle_dim = obstacle_dim  # Number of obstacles to consider
-        self.control_dim = control_dim  # Dimension of the control input
-        self.preprocess = preprocess  # Optional preprocessing function for input data
+# -------------------------
+# Training Loop
+# -------------------------
+def train(cbf_model, controller_model, env, optimizer, epochs):
+    for epoch in range(epochs):
+        # Sample data from the environment
+        states, observations, actions_ref, safe_states, unsafe_states = env.sample_data()
 
-        # Define a series of convolutional layers to process obstacle information.
-        self.conv_layer0 = nn.Conv1d(state_dim, 64, 1)  # First convolutional layer
-        self.conv_layer1 = nn.Conv1d(64, 128, 1)  # Second convolutional layer
-        self.conv_layer2 = nn.Conv1d(128, 128, 1)  # Third convolutional layer
-        # Define fully connected layers to produce the control output.
-        self.fc_layer0 = nn.Linear(128 + control_dim + state_dim, 128)  # First fully connected layer
-        self.fc_layer1 = nn.Linear(128, 64)  # Second fully connected layer
-        self.fc_layer2 = nn.Linear(64, control_dim)  # Final fully connected layer for control output
-        # Activation function (ReLU) to introduce non-linearity
-        self.activation_func = nn.ReLU()
-        # Output activation function (Tanh) to limit the output range
-        self.output_func = nn.Tanh()
-        # Scaling factor for the output control signal
-        self.output_scale = output_scale
+        # Compute losses
+        cbf_loss_value = cbf_loss(cbf_model, states, observations, actions_ref, safe_states, unsafe_states)
+        controller_loss_value = controller_loss(controller_model, cbf_model, states, observations, actions_ref)
 
-    def forward(self, state, obstacle, nominal_control, state_error):
-        """
-        Forward pass of the NNController network.
-        Args:
-            state: Tensor of shape (batch_size, state_dim) representing the current state of the system.
-            obstacle: Tensor of shape (batch_size, obstacle_dim, state_dim) representing the positions of obstacles.
-            nominal_control: Tensor of shape (batch_size, control_dim) representing the nominal control input.
-            state_error: Tensor of shape (batch_size, state_dim) representing the difference between desired and current state.
-        Returns:
-            control: Tensor of shape (batch_size, control_dim) representing the adjusted control output.
-        """
-        # Add an extra dimension to the state tensor for compatibility with Conv1d.
-        state = torch.unsqueeze(state, 2)  # (batch_size, state_dim, 1)
-        # Rearrange obstacle tensor dimensions to match state tensor for computation.
-        obstacle = obstacle.permute(0, 2, 1)  # (batch_size, state_dim, obstacle_dim)
-        # Calculate the difference between the state and obstacle tensors.
-        state_diff = state - obstacle
+        # Update models
+        optimizer.zero_grad()
+        total_loss = cbf_loss_value + controller_loss_value
+        total_loss.backward()
+        optimizer.step()
 
-        # Apply preprocessing function if defined.
-        if self.preprocess is not None:
-            state_diff = self.preprocess(state_diff)
-            state_error = self.preprocess(state_error)
+        print(f"Epoch {epoch}: Total Loss = {total_loss.item()}")
 
-        # Pass the state-obstacle difference through the convolutional layers with activation.
-        x = self.activation_func(self.conv_layer0(state_diff))
-        x = self.activation_func(self.conv_layer1(x))
-        x = self.activation_func(self.conv_layer2(x))  # (batch_size, 128, obstacle_dim)
-        # Apply max pooling across the obstacle dimension to extract a single feature vector.
-        x, _ = torch.max(x, dim=2)  # (batch_size, 128)
-        # Concatenate the extracted features, nominal control, and state error.
-        x = torch.cat([x, nominal_control, state_error], dim=1)  # (batch_size, 128 + control_dim + state_dim)
-        # Pass through the fully connected layers with activation.
-        x = self.activation_func(self.fc_layer0(x))
-        x = self.activation_func(self.fc_layer1(x))
-        # Compute the control output with scaling and add the nominal control.
-        x = self.output_func(self.fc_layer2(x)) * self.output_scale
-        control = x + nominal_control
-        return control
+# -------------------------
+# Test and Refine Control
+# -------------------------
+def refine_control(cbf_model, controller_model, state, observation):
+    action = controller_model(state, observation)
+    cbf_value = cbf_model(state, observation)
+    
+    if cbf_value < 0:
+        # Refine action to satisfy CBF conditions
+        action += torch.relu(-cbf_value)
+    return action
 
+# -------------------------
+# Environment Simulation Stub
+# -------------------------
+class Environment:
+    def __init__(self, state_dim, obs_dim, action_dim):
+        self.state_dim = state_dim
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
 
-# Define a control-affine dynamics model
-class ControlAffineDynamics(nn.Module):
-    """
-    The ControlAffineDynamics class models the system dynamics in a control-affine form.
-    It computes the drift term f(s) and the control matrix B(s) such that the system dynamics are represented as:
-    s_dot = f(s) + B(s) * u
-    """
+    def sample_data(self, batch_size=128):
+        # Simulate environment data (replace with actual simulation)
+        states = torch.rand(batch_size, self.state_dim)
+        observations = torch.rand(batch_size, self.obs_dim)
+        actions_ref = torch.rand(batch_size, self.action_dim)
+        safe_states = torch.rand(batch_size, self.state_dim) * 0.5
+        unsafe_states = torch.rand(batch_size, self.state_dim) * -0.5
+        return states, observations, actions_ref, safe_states, unsafe_states
 
-    def __init__(self, state_dim, control_dim, preprocess=None, extended_state_dim=0):
-        super().__init__()
-        # Initialize class variables for dimensions of state, control, and extended state.
-        self.state_dim = state_dim  # Dimension of the system state
-        self.control_dim = control_dim  # Dimension of the control input
-        self.preprocess = preprocess  # Optional preprocessing function for input data
-        self.extended_state_dim = extended_state_dim  # Dimension of any extended state (e.g., additional features)
+# -------------------------
+# Main Script
+# -------------------------
+if __name__ == "__main__":
+    # Environment settings
+    state_dim = 4
+    obs_dim = 4
+    action_dim = 2
+    hidden_dim = 64
 
-        # Define fully connected layers for computing the drift term f(s).
-        self.f_fc_layer0 = nn.Linear(state_dim + extended_state_dim, 64)  # First fully connected layer for f(s)
-        self.f_fc_layer1 = nn.Linear(64, 128)  # Second fully connected layer for f(s)
-        self.f_fc_layer2 = nn.Linear(128, state_dim)  # Final layer to produce f(s)
+    # Initialize models
+    cbf_model = CBF(state_dim + obs_dim, hidden_dim)
+    controller_model = Controller(state_dim + obs_dim, hidden_dim, action_dim)
 
-        # Define fully connected layers for computing the control matrix B(s).
-        self.B_fc_layer0 = nn.Linear(state_dim + extended_state_dim, 64)  # First fully connected layer for B(s)
-        self.B_fc_layer1 = nn.Linear(64, 128)  # Second fully connected layer for B(s)
-        self.B_fc_layer2 = nn.Linear(128, state_dim * control_dim)  # Final layer to produce B(s)
+    # Environment and optimizer
+    env = Environment(state_dim, obs_dim, action_dim)
+    optimizer = optim.Adam(list(cbf_model.parameters()) + list(controller_model.parameters()), lr=1e-3)
 
-        # Activation function (Tanh) to introduce non-linearity
-        self.activation_func = nn.Tanh()
+    # Train models
+    epochs = 50
+    train(cbf_model, controller_model, env, optimizer, epochs)
 
-    def forward(self, state, control):
-        """ 
-        Compute the drift term f(s) and the control matrix B(s) for the control-affine system dynamics.
-        Args:
-            state: Tensor of shape (batch_size, state_dim) representing the current state of the system.
-            control: Tensor of shape (batch_size, control_dim) representing the control input.
-        Returns:
-            f: Tensor of shape (batch_size, state_dim) representing the drift term of the system dynamics.
-            B: Tensor of shape (batch_size, state_dim, control_dim) representing the control matrix of the system dynamics.
-        """
-        # Apply preprocessing function if defined.
-        if self.preprocess is not None:
-            state = self.preprocess(state)  # (batch_size, state_dim + extended_state_dim)
-
-        # Compute the drift term f(s) using the fully connected layers.
-        x = self.activation_func(self.f_fc_layer0(state))
-        x = self.activation_func(self.f_fc_layer1(x))
-        f = self.f_fc_layer2(x)  # (batch_size, state_dim)
-
-        # Compute the control matrix B(s) using the fully connected layers.
-        x = self.activation_func(self.B_fc_layer0(state))
-        x = self.activation_func(self.B_fc_layer1(x))
-        B = self.B_fc_layer2(x).view(-1, self.state_dim, self.control_dim)  # (batch_size, state_dim, control_dim)
-
-        return f, B
+    # Test and refine control
+    test_state = torch.rand(1, state_dim)
+    test_observation = torch.rand(1, obs_dim)
+    refined_action = refine_control(cbf_model, controller_model, test_state, test_observation)
+    print("Refined Action:", refined_action)
